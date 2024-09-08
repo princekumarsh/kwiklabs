@@ -9,7 +9,7 @@ terraform {
   }
   backend "gcs" {
     bucket = "qwiklabs-gcp-03-6ffc66ee760a-bucket-tfstate"
-    prefix = "terraform/state"
+    prefix = ""  # Remove the prefix to store at root level
   }
 }
 
@@ -42,72 +42,7 @@ resource "google_sql_user" "postgres" {
   password = "postgres"
 }
 
-# Load Balancer
-module "lb-http" {
-  source  = "GoogleCloudPlatform/lb-http/google"
-  version = "~> 6.3"
-
-  project           = var.project_id
-  name              = "cepf-infra-lb"
-  target_tags       = ["allow-health-check"]
-  backends = {
-    default = {
-      description                     = null
-      protocol                        = "HTTP"
-      port                            = 80
-      port_name                       = "http"
-      timeout_sec                     = 10
-      enable_cdn                      = false
-      custom_request_headers          = null
-      custom_response_headers         = null
-      security_policy                 = null
-
-      connection_draining_timeout_sec = null
-      session_affinity                = "GENERATED_COOKIE"
-      affinity_cookie_ttl_sec         = 3600
-
-      health_check = {
-        check_interval_sec  = null
-        timeout_sec         = null
-        healthy_threshold   = null
-        unhealthy_threshold = null
-        request_path        = "/"
-        port                = 80
-        host                = null
-        logging             = null
-      }
-
-      log_config = {
-        enable = true
-        sample_rate = 1.0
-      }
-
-      groups = [
-        {
-          group                        = google_compute_instance_group_manager.cepf_mig.instance_group
-          balancing_mode               = null
-          capacity_scaler              = null
-          description                  = null
-          max_connections              = null
-          max_connections_per_instance = null
-          max_connections_per_endpoint = null
-          max_rate                     = null
-          max_rate_per_instance        = null
-          max_rate_per_endpoint        = null
-          max_utilization              = null
-        },
-      ]
-
-      iap_config = {
-        enable               = false
-        oauth2_client_id     = null
-        oauth2_client_secret = null
-      }
-    }
-  }
-}
-
-# Instance Template
+# Managed Instance Group
 resource "google_compute_instance_template" "cepf_template" {
   name        = "cepf-template"
   description = "This template is used to create app server instances."
@@ -143,7 +78,6 @@ resource "google_compute_instance_template" "cepf_template" {
   }
 }
 
-# Managed Instance Group
 resource "google_compute_instance_group_manager" "cepf_mig" {
   name = "cepf-infra-lb-group1-mig"
 
@@ -167,7 +101,6 @@ resource "google_compute_instance_group_manager" "cepf_mig" {
   }
 }
 
-# Autoscaler
 resource "google_compute_autoscaler" "cepf_autoscaler" {
   name   = "cepf-autoscaler"
   zone   = "${var.region}-b"
@@ -195,6 +128,37 @@ resource "google_compute_health_check" "autohealing" {
   http_health_check {
     request_path = "/"
     port         = "80"
+  }
+}
+
+# Load Balancer
+resource "google_compute_global_forwarding_rule" "cepf_infra_lb" {
+  name       = "cepf-infra-lb"
+  target     = google_compute_target_http_proxy.cepf_infra_lb_proxy.id
+  port_range = "80"
+}
+
+resource "google_compute_target_http_proxy" "cepf_infra_lb_proxy" {
+  name    = "cepf-infra-lb-proxy"
+  url_map = google_compute_url_map.cepf_infra_lb_url_map.id
+}
+
+resource "google_compute_url_map" "cepf_infra_lb_url_map" {
+  name            = "cepf-infra-lb-url-map"
+  default_service = google_compute_backend_service.cepf_infra_lb_backend_default.id
+}
+
+resource "google_compute_backend_service" "cepf_infra_lb_backend_default" {
+  name                  = "cepf-infra-lb-backend-default"
+  protocol              = "HTTP"
+  port_name             = "http"
+  load_balancing_scheme = "EXTERNAL"
+  timeout_sec           = 10
+  health_checks         = [google_compute_health_check.autohealing.id]
+  backend {
+    group           = google_compute_instance_group_manager.cepf_mig.instance_group
+    balancing_mode  = "UTILIZATION"
+    capacity_scaler = 1.0
   }
 }
 
