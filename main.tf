@@ -9,7 +9,7 @@ terraform {
   }
   backend "gcs" {
     bucket = "qwiklabs-gcp-03-6ffc66ee760a-bucket-tfstate"
-    prefix = ""  # Remove the prefix to store at root level
+    prefix = ""
   }
 }
 
@@ -31,18 +31,7 @@ resource "google_sql_database_instance" "cepf_instance" {
   deletion_protection = false
 }
 
-resource "google_sql_database" "cepf_db" {
-  name     = "cepf-db"
-  instance = google_sql_database_instance.cepf_instance.name
-}
-
-resource "google_sql_user" "postgres" {
-  name     = "postgres"
-  instance = google_sql_database_instance.cepf_instance.name
-  password = "postgres"
-}
-
-# Managed Instance Group
+# Instance Template
 resource "google_compute_instance_template" "cepf_template" {
   name        = "cepf-template"
   description = "This template is used to create app server instances."
@@ -78,11 +67,27 @@ resource "google_compute_instance_template" "cepf_template" {
   }
 }
 
-resource "google_compute_instance_group_manager" "cepf_mig" {
-  name = "cepf-infra-lb-group1-mig"
+# Health Check
+resource "google_compute_health_check" "autohealing" {
+  name                = "autohealing-health-check"
+  check_interval_sec  = 5
+  timeout_sec         = 5
+  healthy_threshold   = 2
+  unhealthy_threshold = 10
+
+  http_health_check {
+    request_path = "/"
+    port         = "80"
+  }
+}
+
+# Regional Instance Group Manager
+resource "google_compute_region_instance_group_manager" "cepf_mig" {
+  name   = "cepf-infra-lb-group1-mig"
+  region = var.region
+  project = var.project_id
 
   base_instance_name = "cepf-mig"
-  zone               = "${var.region}-b"
 
   version {
     instance_template = google_compute_instance_template.cepf_template.id
@@ -101,10 +106,12 @@ resource "google_compute_instance_group_manager" "cepf_mig" {
   }
 }
 
-resource "google_compute_autoscaler" "cepf_autoscaler" {
+# Autoscaler
+resource "google_compute_region_autoscaler" "cepf_autoscaler" {
   name   = "cepf-autoscaler"
-  zone   = "${var.region}-b"
-  target = google_compute_instance_group_manager.cepf_mig.id
+  region = var.region
+  project = var.project_id
+  target = google_compute_region_instance_group_manager.cepf_mig.id
 
   autoscaling_policy {
     max_replicas    = 4
@@ -117,62 +124,37 @@ resource "google_compute_autoscaler" "cepf_autoscaler" {
   }
 }
 
-# Health check
-resource "google_compute_health_check" "autohealing" {
-  name                = "autohealing-health-check"
-  check_interval_sec  = 5
-  timeout_sec         = 5
-  healthy_threshold   = 2
-  unhealthy_threshold = 10
-
-  http_health_check {
-    request_path = "/"
-    port         = "80"
-  }
-}
-
 # Load Balancer
-resource "google_compute_global_forwarding_rule" "cepf_infra_lb" {
-  name       = "cepf-infra-lb"
-  target     = google_compute_target_http_proxy.cepf_infra_lb_proxy.id
-  port_range = "80"
-}
-
-resource "google_compute_target_http_proxy" "cepf_infra_lb_proxy" {
-  name    = "cepf-infra-lb-proxy"
-  url_map = google_compute_url_map.cepf_infra_lb_url_map.id
-}
-
-resource "google_compute_url_map" "cepf_infra_lb_url_map" {
-  name            = "cepf-infra-lb-url-map"
-  default_service = google_compute_backend_service.cepf_infra_lb_backend_default.id
-}
-
 resource "google_compute_backend_service" "cepf_infra_lb_backend_default" {
   name                  = "cepf-infra-lb-backend-default"
+  project               = var.project_id
   protocol              = "HTTP"
   port_name             = "http"
   load_balancing_scheme = "EXTERNAL"
   timeout_sec           = 10
   health_checks         = [google_compute_health_check.autohealing.id]
   backend {
-    group           = google_compute_instance_group_manager.cepf_mig.instance_group
+    group           = google_compute_region_instance_group_manager.cepf_mig.instance_group
     balancing_mode  = "UTILIZATION"
     capacity_scaler = 1.0
   }
 }
 
-# Cloud NAT
-resource "google_compute_router" "router" {
-  name    = "cepf-router"
-  region  = var.region
-  network = "default"
+resource "google_compute_url_map" "cepf_infra_lb_url_map" {
+  name            = "cepf-infra-lb-url-map"
+  project         = var.project_id
+  default_service = google_compute_backend_service.cepf_infra_lb_backend_default.id
 }
 
-resource "google_compute_router_nat" "nat" {
-  name                               = "cepf-router-nat"
-  router                             = google_compute_router.router.name
-  region                             = google_compute_router.router.region
-  nat_ip_allocate_option             = "AUTO_ONLY"
-  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+resource "google_compute_target_http_proxy" "cepf_infra_lb_proxy" {
+  name    = "cepf-infra-lb-proxy"
+  project = var.project_id
+  url_map = google_compute_url_map.cepf_infra_lb_url_map.id
+}
+
+resource "google_compute_global_forwarding_rule" "cepf_infra_lb" {
+  name       = "cepf-infra-lb"
+  project    = var.project_id
+  target     = google_compute_target_http_proxy.cepf_infra_lb_proxy.id
+  port_range = "80"
 }
